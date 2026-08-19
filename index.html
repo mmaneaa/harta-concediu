@@ -2208,7 +2208,9 @@ document.getElementById('p-setari').addEventListener('click', e => {
     Object.keys(S.edits).forEach(k=>{ if(S.edits[k]) S.edits[k].img=null; });
     buildMarkers(); renderAll(); toast('Imagini șterse.');
   } else if (x==='save'){
-    dl('plan-italia.json', JSON.stringify(S,null,1), 'application/json');
+    const safe = JSON.parse(JSON.stringify(S));
+    delete safe.apiKey; delete safe.gKey;          // cheile rămân doar în browserul tău
+    dl('plan-italia.json', JSON.stringify(safe,null,1), 'application/json');
   } else if (x==='restore'){
     const n = S.deleted.length; S.deleted = []; buildMarkers(); renderAll();
     toast('Am readus ' + n + ' loc' + (n>1?'uri':'') + '.');
@@ -2428,7 +2430,7 @@ async function overpassPOI(b, mode){
   const BB = [b.getSouth().toFixed(5), b.getWest().toFixed(5),
               b.getNorth().toFixed(5), b.getEast().toFixed(5)].join(',');
   const q = '[out:json][timeout:20];' + OVQ[mode].split('BB').join(BB) + 'out center tags 400;';
-  const els = await overpass(q, 16000);
+  const els = await overpass(q, 6500);
   if (!els) return null;
   return els.map(e => {
     const la = e.lat != null ? e.lat : (e.center||{}).lat;
@@ -2513,28 +2515,36 @@ async function searchArea(b, mode){
       toast('Google a refuzat cererea: ' + String(g.err).slice(0,80) + ' — folosesc OpenStreetMap.');
     }
   }
+  let phReady = null;
   if (!viaGoogle && areaMode !== 'att'){
     prog('Interoghez OpenStreetMap…');
-    const ov = await overpassPOI(b, areaMode);
-    if (ov && ov.length){ raw.push.apply(raw, ov); viaOverpass = true; }
-    else prog('Overpass nu răspunde, trec pe sursa de rezervă…');
+    /* Pornim ambele surse deodată. Overpass e mai bogat, dar cade des — dacă nu
+       livrează în 2,5 s, folosim rezerva care e deja pe drum. */
+    const ovP = overpassPOI(b, areaMode).catch(() => null);
+    phReady = Promise.all(tiles.slice(0, 4).map(t =>
+      photonTags(t.lat, t.lon, t.r, areaMode === 'food' ? FTAGS : STAGS).catch(() => [])
+    )).then(parts => [].concat.apply([], parts));
+    const ov = await Promise.race([ovP, new Promise(r => setTimeout(() => r('SLOW'), 2500))]);
+    if (ov && ov !== 'SLOW' && ov.length){ raw.push.apply(raw, ov); viaOverpass = true; }
+    else prog('Overpass e lent sau picat, folosesc rezerva…');
   }
-  if (!viaOverpass && !(viaGoogle && areaMode !== 'att')){
+  if (phReady && !viaOverpass){
+    raw.push.apply(raw, await phReady);
+  } else if (!viaOverpass && !(viaGoogle && areaMode !== 'att')){
     /* pentru localuri și magazine, câteva sectoare sunt destule — altfel durează o veșnicie */
     const use = areaMode === 'att' ? tiles.slice(0, viaGoogle ? 4 : 9) : tiles.slice(0, 4);
-    for (let k=0;k<use.length;k++){
-      const t = use[k];
-      prog(`Sectorul ${k+1} din ${use.length}…`);
+    prog(`Interoghez ${use.length} ${use.length===1?'sector':'sectoare'}, în paralel…`);
+    const jobs = [];
+    use.forEach(t => {
       if (areaMode === 'att'){
-        const w = await wikiGeoList(t.lat,t.lon,t.r);
-        raw.push.apply(raw, w);
-        if (!viaGoogle) raw.push.apply(raw, await photonTags(t.lat,t.lon,t.r,ATAGS));
+        jobs.push(wikiGeoList(t.lat, t.lon, t.r));
+        if (!viaGoogle) jobs.push(photonTags(t.lat, t.lon, t.r, ATAGS));
       } else {
-        raw.push.apply(raw, await photonTags(t.lat, t.lon, t.r,
-          areaMode === 'food' ? FTAGS : STAGS));
+        jobs.push(photonTags(t.lat, t.lon, t.r, areaMode === 'food' ? FTAGS : STAGS));
       }
-      await new Promise(r=>setTimeout(r,120));
-    }
+    });
+    const parts = await Promise.all(jobs.map(p => p.catch(() => [])));
+    parts.forEach(a => raw.push.apply(raw, a));
   }
   let list = raw.filter(x => b.contains([x.lat, x.lon]));
   const keep = [];
@@ -2568,7 +2578,7 @@ async function searchArea(b, mode){
   /* programul și bucătăria vin după, pe fundal, doar pentru primele rezultate */
   if (needDetails){
     const mode = areaMode;
-    osmDetails(out.slice(0, 60)).then(() => {
+    osmDetails(out.slice(0, 45)).then(() => {
       if (areaMode !== mode) return;
       out.forEach(c => { c.icon = iconFor(mode, {name:c.name, val:c.tag, cuisine:c.cuisine, brand:c.brand}); });
       showCands(); renderArea();
@@ -3186,14 +3196,20 @@ function fetchT(url, opts, ms){
     .finally(() => clearTimeout(t));
 }
 async function overpass(q, ms){
+  const cap = ms || 6500;
   const tries = OVMIRRORS.map(url =>
-    fetchT(url, {method:'POST', body:q}, ms || 14000).then(async r => {
+    fetchT(url, {method:'POST', body:q}, cap).then(async r => {
       if (!r.ok) throw new Error('http ' + r.status);
       const d = await r.json();
       if (!d || !d.elements) throw new Error('gol');
       return d.elements;
     }));
-  try { return await Promise.any(tries); } catch(e){ return null; }
+  /* Promise.any ar aștepta și oglinda care atârnă; punem un plafon peste tot. */
+  const bail = new Promise(res => setTimeout(() => res(null), cap + 300));
+  try {
+    const r = await Promise.race([Promise.any(tries).catch(() => null), bail]);
+    return r || null;
+  } catch(e){ return null; }
 }
 const PARK_CAT = 11;
 function walkMin(m){ return Math.max(1, Math.round(m/80)); }
@@ -3454,8 +3470,9 @@ async function buildPack(withImages){
     }
   }
   msg.innerHTML = 'Construiesc fișierul…';
-  // starea completă, cu imaginile transformate în date locale
+  // starea completă, dar FĂRĂ chei API — fișierul poate ajunge public
   const st = JSON.parse(JSON.stringify(S));
+  delete st.apiKey; delete st.gKey;
   if (withImages){
     st.custom.forEach(c => { if (embedded[c.id]) c.img = Object.assign({}, c.img, {u: embedded[c.id]}); });
     Object.keys(embedded).forEach(id => {

@@ -1,6 +1,6 @@
 /* Harta Italia — service worker
    Ține aplicația, hărțile și pozele în memoria telefonului, ca să meargă fără semnal. */
-const V = 'italia-v7';
+const V = 'italia-v8';
 const SHELL = V + '-shell';
 const TILES = 'italia-tiles';     // fără versiune: hărțile descărcate supraviețuiesc actualizărilor
 const MEDIA = 'italia-media';
