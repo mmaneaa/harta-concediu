@@ -68,6 +68,19 @@ Tot ce ai deschis o dată — poze, descrieri — rămâne și el salvat.
 cerere, vremea și calculul rutelor. Astea au nevoie de internet. Restul — hartă,
 locuri, zile, buget, navigație, bifat vizitat — merge tot.
 
+## Plan comun pentru două telefoane
+
+Fiecare telefon își ține planul separat. Ca să porniți de la același plan:
+
+1. Cel care planifică: **Export → 📤 Publică planul**. Se descarcă `plan.json`.
+2. Urcă `plan.json` pe GitHub, lângă `index.html`.
+3. Ceilalți: **Export → 📥 Adu planul publicat**.
+
+Se înlocuiesc zilele, nivelurile și locurile adăugate. **Bifele de vizitat și cheile
+API rămân ale fiecăruia.** Ai `Anulează` în notificare dacă te-ai răzgândit.
+
+Repetă pașii 1–2 ori de câte ori schimbi planul; ceilalți apasă din nou pe pasul 3.
+
 ## Actualizări
 
 Când vrei o versiune nouă, înlocuiești `index.html` în același loc.
