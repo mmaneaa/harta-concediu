@@ -1,6 +1,6 @@
 /* Harta Italia — service worker
    Ține aplicația, hărțile și pozele în memoria telefonului, ca să meargă fără semnal. */
-const V = 'italia-v5';
+const V = 'italia-v7';
 const SHELL = V + '-shell';
 const TILES = 'italia-tiles';     // fără versiune: hărțile descărcate supraviețuiesc actualizărilor
 const MEDIA = 'italia-media';
@@ -75,6 +75,7 @@ self.addEventListener('fetch', e => {
   const h = url.hostname;
 
   if (hostIn(h, LIVE_HOSTS)) return;                        // direct la rețea
+  if (url.pathname.endsWith('/plan.json')) return;          // planul comun: mereu proaspăt
   if (isWiki(h) && url.pathname.indexOf('/w/api.php') >= 0) return;
 
   if (hostIn(h, TILE_HOSTS)){ e.respondWith(cacheFirst(req, TILES, 6000)); return; }

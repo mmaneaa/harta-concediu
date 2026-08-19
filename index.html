@@ -855,6 +855,15 @@ button{cursor:pointer;background:none;border:none}
         <button data-x="geojson">GeoJSON<small>qgis · mapbox</small></button>
         <button data-x="csv">CSV<small>nume, lat, lon, strat, zi</small></button>
       </div>
+      <div class="sect">Plan comun (pentru mai multe telefoane)</div>
+      <div class="exp">
+        <button data-x="publish">📤 Publică planul (plan.json)
+          <small>descarcă fișierul, apoi urcă-l lângă index.html</small></button>
+        <button data-x="pull">📥 Adu planul publicat
+          <small>înlocuiește zilele și locurile · bifele tale rămân</small></button>
+      </div>
+      <div class="bulk" id="syncMsg"></div>
+
       <div class="sect">Planul tău</div>
       <div class="exp">
         <button data-x="save">Salvează planul (.json)<small>straturi, zile, locuri, editări</small></button>
@@ -906,16 +915,18 @@ button{cursor:pointer;background:none;border:none}
       <p style="font-size:12px;color:var(--muted);line-height:1.6;margin-bottom:9px">
         Cu o cheie <b>Google Places API</b> proprie, unealta de zonă aduce notele și numărul
         de recenzii pentru restaurante și magazine, și le poate ordona după notă.
-        Nu există sursă gratuită fără cheie.</p>
+        <b>Mai important:</b> cu cheie, toată căutarea de zonă trece pe Google — de la
+        peste un minut la sub o secundă, cu program și note incluse.</p>
       <div class="keyrow">
         <input id="gKey" type="password" placeholder="AIza… (opțional)" autocomplete="off">
         <button class="btn" id="gSave">Salvează</button>
       </div>
       <div class="hint">Cum o obții: <b>console.cloud.google.com</b> → proiect nou →
         activezi <b>Places API (New)</b> → <i>Credentials</i> → <i>Create API key</i>.
-        Google cere card chiar și pentru gratuit, dar nivelul <b>Pro</b> îți dă
-        <b>5.000 de apeluri gratuite pe lună</b> — o zonă căutată costă ~6 apeluri, deci
-        n-ai cum să depășești. Restricționează cheia pe <i>HTTP referrer</i> cu adresa
+        Google cere card chiar și pentru gratuit. O zonă căutată costă maximum
+        <b>6 apeluri</b>. Cererea include și programul, ceea ce poate urca factura la
+        nivelul <b>Enterprise</b>, cu <b>1.000 de apeluri gratuite pe lună</b> — adică
+        peste 150 de căutări lunar, mult peste ce ai nevoie. Restricționează cheia pe <i>HTTP referrer</i> cu adresa
         site-ului tău și pune o cotă zilnică mică, ca să dormi liniștit.</div>
 
       <div class="sect">Descrieri automate</div>
@@ -2180,6 +2191,8 @@ document.getElementById('p-setari').addEventListener('click', e => {
         q(layerOf(i.cat).name), S.tier[i.id]||'', S.day[i.id]?S.day[i.id].d:'', S.fav.includes(i.id)?'da':'',
         S.visited.includes(i.id)?'da':'', q(gmapsURL(i)), q(wazeURL(i))].join(','))
     ).join('\n'),'text/csv;charset=utf-8');
+  } else if (x==='publish'){ publishPlan(); return;
+  } else if (x==='pull'){ pullPlan(); return;
   } else if (x==='pack'){ buildPack(true); return;
   } else if (x==='packlite'){ buildPack(false); return;
   } else if (x==='tiles'){ downloadTiles(); return;
@@ -2414,8 +2427,8 @@ const OVQ = {
 async function overpassPOI(b, mode){
   const BB = [b.getSouth().toFixed(5), b.getWest().toFixed(5),
               b.getNorth().toFixed(5), b.getEast().toFixed(5)].join(',');
-  const q = '[out:json][timeout:45];' + OVQ[mode].split('BB').join(BB) + 'out center tags 500;';
-  const els = await overpass(q);
+  const q = '[out:json][timeout:20];' + OVQ[mode].split('BB').join(BB) + 'out center tags 400;';
+  const els = await overpass(q, 16000);
   if (!els) return null;
   return els.map(e => {
     const la = e.lat != null ? e.lat : (e.center||{}).lat;
@@ -2449,7 +2462,7 @@ async function osmDetails(list){
         it.tel = e.phone || e['contact:phone'] || '';
       });
     } catch(e){}
-    await new Promise(r=>setTimeout(r, 1100));
+    await new Promise(r=>setTimeout(r, 700));
   }
 }
 function reviewURL(c){
@@ -2459,7 +2472,7 @@ function reviewURL(c){
 
 let RES = {att:[], food:[], shop:[]}, LOADED = {att:false, food:false, shop:false};
 let areaBounds = null, areaRect = null, areaMode = 'att', areaTrunc = 0;
-let areaShowAll = false, areaOnlyWiki = false, areaExpand = {}, areaSort = 'dist';
+let areaShowAll = false, areaOnlyWiki = false, areaExpand = {}, areaSort = 'dist', areaSrc = '';
 const gCand = L.layerGroup();
 const catsFor = () => areaMode === 'att' ? ACATS : areaMode === 'food' ? FCATS : SCATS;
 const MODE_LBL = {att:'Atracții', food:'Mâncare', shop:'Magazine'};
@@ -2482,27 +2495,45 @@ async function searchArea(b, mode){
   const { tiles, total, diag } = tileCircles(b);
   areaTrunc = total > tiles.length ? total : 0;
   if (diag > 140){ toast('Zona e prea mare (' + diag.toFixed(0) + ' km). Apropie harta.'); closeArea(); return; }
+  if (areaMode !== 'att' && diag > 55){
+    toast('Pentru localuri și magazine, alege o zonă mai mică de ~50 km — altfel durează mult și ies sute de rezultate.');
+    closeArea(); return; }
   areaLoading(areaMode==='att' ? 'Caut atracții în zonă'
     : areaMode==='food' ? 'Caut unde se mănâncă' : 'Caut magazine și supermarketuri');
   const raw = [];
-  let viaOverpass = false;
-  if (areaMode !== 'att'){
+  let viaOverpass = false, viaGoogle = false;
+  if (S.gKey){
+    const g = await googleArea(b, areaMode, prog);
+    if (g.list && g.list.length){
+      viaGoogle = true;
+      raw.push.apply(raw, g.list.map(x => ({ name:x.name, lat:x.lat, lon:x.lon, src:'google',
+        key:'', val:x.gtype, cuisine:'', hours:x.hours, tel:'', web:'', brand:'',
+        rating:x.rating, votes:x.votes, price:x.price })));
+    } else if (g.err){
+      toast('Google a refuzat cererea: ' + String(g.err).slice(0,80) + ' — folosesc OpenStreetMap.');
+    }
+  }
+  if (!viaGoogle && areaMode !== 'att'){
     prog('Interoghez OpenStreetMap…');
     const ov = await overpassPOI(b, areaMode);
     if (ov && ov.length){ raw.push.apply(raw, ov); viaOverpass = true; }
+    else prog('Overpass nu răspunde, trec pe sursa de rezervă…');
   }
-  if (!viaOverpass){
-    for (let k=0;k<tiles.length;k++){
-      const t = tiles[k];
-      prog(`Sectorul ${k+1} din ${tiles.length}…`);
+  if (!viaOverpass && !(viaGoogle && areaMode !== 'att')){
+    /* pentru localuri și magazine, câteva sectoare sunt destule — altfel durează o veșnicie */
+    const use = areaMode === 'att' ? tiles.slice(0, viaGoogle ? 4 : 9) : tiles.slice(0, 4);
+    for (let k=0;k<use.length;k++){
+      const t = use[k];
+      prog(`Sectorul ${k+1} din ${use.length}…`);
       if (areaMode === 'att'){
-        const [w, p] = await Promise.all([wikiGeoList(t.lat,t.lon,t.r), photonTags(t.lat,t.lon,t.r,ATAGS)]);
-        raw.push.apply(raw, w); raw.push.apply(raw, p);
+        const w = await wikiGeoList(t.lat,t.lon,t.r);
+        raw.push.apply(raw, w);
+        if (!viaGoogle) raw.push.apply(raw, await photonTags(t.lat,t.lon,t.r,ATAGS));
       } else {
         raw.push.apply(raw, await photonTags(t.lat, t.lon, t.r,
           areaMode === 'food' ? FTAGS : STAGS));
       }
-      await new Promise(r=>setTimeout(r,180));
+      await new Promise(r=>setTimeout(r,120));
     }
   }
   let list = raw.filter(x => b.contains([x.lat, x.lon]));
@@ -2521,20 +2552,28 @@ async function searchArea(b, mode){
       src: x.src, icon: iconFor(areaMode, x),
       tag: x.val ? String(x.val).replace(/_/g,' ') : (x.src==='wiki' ? 'wikipedia' : ''),
       cuisine: x.cuisine||'', hours: x.hours||'', tel: x.tel||'', web: x.web||'', brand: x.brand||'',
+      rating: x.rating||null, votes: x.votes||0, price: x.price||'',
       have: existingNear(x), sel: false
     }));
   if (out.length > 450) out = out.slice(0, 450);
-  if (areaMode !== 'att' && !viaOverpass){
-    prog('Caut programul și detaliile…');
-    await osmDetails(out);
-    out.forEach(c => { c.icon = iconFor(areaMode, {name:c.name, val:c.tag, cuisine:c.cuisine, brand:c.brand}); });
-  }
+  const needDetails = areaMode !== 'att' && !viaOverpass && !viaGoogle;
+  areaSrc = viaGoogle ? 'Google' : viaOverpass ? 'OpenStreetMap' : 'OpenStreetMap (rezervă)';
   out.sort((a,b2) => catsFor().findIndex(z=>z.k===a.icon) - catsFor().findIndex(z=>z.k===b2.icon)
     || dist(HOME,a) - dist(HOME,b2));
   RES[areaMode] = out; LOADED[areaMode] = true;
   areaOnlyWiki = areaMode==='att' && out.length > 120;
   areaShowAll = false; areaExpand = {};
+  areaSort = out.some(c => c.rating) ? 'rating' : 'dist';
   showCands(); renderArea();
+  /* programul și bucătăria vin după, pe fundal, doar pentru primele rezultate */
+  if (needDetails){
+    const mode = areaMode;
+    osmDetails(out.slice(0, 60)).then(() => {
+      if (areaMode !== mode) return;
+      out.forEach(c => { c.icon = iconFor(mode, {name:c.name, val:c.tag, cuisine:c.cuisine, brand:c.brand}); });
+      showCands(); renderArea();
+    });
+  }
 }
 function areaVisible(){
   const v = (RES[areaMode]||[]).filter(c =>
@@ -2603,10 +2642,11 @@ function renderArea(){
     <div class="eb">
       ${seg}
       <div class="acount"><b>${vis.length}</b> afișate din ${all.length}
+        ${areaSrc?`· sursa: <b style="color:var(--sea)">${esc(areaSrc)}</b>`:''}
         ${nhave?`· ${nhave} deja pe hartă`:''}
         ${areaTrunc?`· am acoperit 9 din ${areaTrunc} sectoare`:''}</div>
       ${areaMode!=='att' ? `<div class="ratebar">
-        <button class="btn" id="arRate" style="flex:1.4">★ ${RES[areaMode].some(c=>c.rating)?'Reîmprospătează notele':'Adu notele de pe Google'}</button>
+        <button class="btn" id="arRate" style="flex:1.4">★ ${RES[areaMode].some(c=>c.rating)?'Mai adu note':'Adu notele de pe Google'}</button>
         <div class="sortsw">
           <button data-asort="dist" aria-pressed="${areaSort==='dist'}">distanță</button>
           <button data-asort="rating" aria-pressed="${areaSort==='rating'}">notă</button>
@@ -2619,7 +2659,8 @@ function renderArea(){
         <span class="r">${all.filter(c=>c.icon==='dot').length} ascunse</span></button>`
       : `<div class="hint" style="margin:0 0 10px">${areaMode==='food'
          ? 'Datele vin din OpenStreetMap: numele și tipul sunt aproape mereu acolo, programul doar la unele. Apasă pe un rând ca să vezi fișa, cu poză și link către recenziile din Google Maps.'
-         : 'Atenție la program: în Italia multe magazine mici închid la prânz (13–16) și duminica. Supermarketurile mari stau deschise continuu. Verifică orarul afișat, unde există.'}</div>`}
+         : 'Atenție la program: în Italia multe magazine mici închid la prânz (13–16) și duminica. Supermarketurile mari stau deschise continuu. Verifică orarul afișat, unde există.'}
+         ${areaSrc==='Google'?'<br><br>Rezultatele vin de la <b>Google</b>, cu note și program — mai complete și mult mai rapide decât OpenStreetMap.':'<br><br>Cu o <b>cheie Google Places</b> în tabul Export, căutarea devine mult mai rapidă și aduce note și program.'}</div>`}
       <div class="fld" style="margin:13px 0 8px"><label>Adaugă în stratul</label>
         <select id="arLay">
           <option value="new">➕ Strat nou „${areaMode==='att'?'Descoperite':'Mâncare & băut'}”</option>
@@ -3009,15 +3050,28 @@ const GTYPES = {
          'italian_restaurant','seafood_restaurant'],
   shop: ['supermarket','grocery_store','market','convenience_store','liquor_store',
          'butcher_shop','bakery'],
-  att:  ['tourist_attraction','museum','historical_landmark','art_gallery','park','church']
+  att:  ['tourist_attraction','museum','historical_landmark','art_gallery','park','church',
+         'zoo','aquarium','national_park']
+};
+/* dacă Google respinge vreun tip, reîncercăm cu minimul sigur */
+const GTYPES_MIN = { food:['restaurant'], shop:['supermarket'], att:['tourist_attraction'] };
+const GTYPE_RO = {
+  restaurant:'restaurant', cafe:'cafenea', bar:'bar', bakery:'brutărie',
+  ice_cream_shop:'gelaterie', supermarket:'supermarket', grocery_store:'alimentara',
+  convenience_store:'magazin mic', liquor_store:'băuturi', butcher_shop:'măcelărie',
+  market:'piață', museum:'muzeu', tourist_attraction:'obiectiv turistic',
+  historical_landmark:'monument istoric', art_gallery:'galerie', park:'parc', church:'biserică'
 };
 /* Cerem doar câmpuri din nivelul Pro (5.000 apeluri gratuite pe lună). */
 const GMASK = 'places.id,places.displayName,places.location,places.rating,'
   + 'places.userRatingCount,places.priceLevel,places.primaryTypeDisplayName';
-async function googleNearby(lat, lon, radiusM, types, key){
+const GMASK_FULL = GMASK + ',places.types,places.businessStatus,'
+  + 'places.regularOpeningHours.weekdayDescriptions';
+async function googleNearby(lat, lon, radiusM, types, key, mask){
   const r = await fetch('https://places.googleapis.com/v1/places:searchNearby', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'X-Goog-Api-Key': key, 'X-Goog-FieldMask': GMASK },
+    headers: { 'Content-Type': 'application/json', 'X-Goog-Api-Key': key,
+      'X-Goog-FieldMask': mask || GMASK },
     body: JSON.stringify({ includedTypes: types, maxResultCount: 20,
       rankPreference: 'POPULARITY',
       locationRestriction: { circle: { center: { latitude: lat, longitude: lon },
@@ -3029,12 +3083,43 @@ async function googleNearby(lat, lon, radiusM, types, key){
     throw new Error(m);
   }
   const d = await r.json();
-  return (d.places||[]).map(p => ({
-    gid: p.id, name: (p.displayName||{}).text || '',
-    lat: (p.location||{}).latitude, lon: (p.location||{}).longitude,
-    rating: p.rating || null, votes: p.userRatingCount || 0,
-    price: p.priceLevel || '', gtype: (p.primaryTypeDisplayName||{}).text || ''
-  })).filter(x => x.lat != null && x.name);
+  return (d.places||[]).map(p => {
+    const oh = ((p.regularOpeningHours||{}).weekdayDescriptions)||[];
+    const t0 = (p.types||[])[0] || '';
+    return { gid: p.id, name: (p.displayName||{}).text || '',
+      lat: (p.location||{}).latitude, lon: (p.location||{}).longitude,
+      rating: p.rating || null, votes: p.userRatingCount || 0,
+      price: p.priceLevel || '',
+      gtype: (p.primaryTypeDisplayName||{}).text || GTYPE_RO[t0] || t0.replace(/_/g,' '),
+      hours: oh.length ? oh.join(' · ') : '',
+      closed: p.businessStatus === 'CLOSED_PERMANENTLY' };
+  }).filter(x => x.lat != null && x.name && !x.closed);
+}
+/* Căutare completă pe zonă, cu Google: rapid și stabil, dar cere cheia utilizatorului. */
+async function googleArea(b, mode, onProg){
+  const { tiles } = tileCircles(b);
+  const spots = tiles.slice(0, 6);
+  const diagKm = dist({lat:b.getSouth(),lon:b.getWest()}, {lat:b.getNorth(),lon:b.getEast()});
+  const rad = Math.max(500, Math.min(50000, diagKm*1000 / (2*Math.sqrt(spots.length))));
+  let types = GTYPES[mode] || GTYPES.food, out = [], err = null;
+  for (let k=0; k<spots.length; k++){
+    if (onProg) onProg(`Google: sectorul ${k+1} din ${spots.length}…`);
+    try {
+      out = out.concat(await googleNearby(spots[k].lat, spots[k].lon, rad, types, S.gKey, GMASK_FULL));
+    } catch(e){
+      const m = String(e.message||'');
+      if (/type/i.test(m) && types !== GTYPES_MIN[mode]){     // un tip refuzat -> minimul sigur
+        types = GTYPES_MIN[mode]; k--; continue;
+      }
+      err = m; break;
+    }
+    await new Promise(r=>setTimeout(r,120));
+  }
+  if (err && !out.length) return { err };
+  const seen = {};
+  const list = out.filter(x => { const k2 = x.gid || (x.lat.toFixed(5)+x.lon.toFixed(5));
+    if (seen[k2]) return false; seen[k2] = 1; return b.contains([x.lat, x.lon]); });
+  return { list, err };
 }
 const PRICE = {PRICE_LEVEL_FREE:'gratuit', PRICE_LEVEL_INEXPENSIVE:'€',
   PRICE_LEVEL_MODERATE:'€€', PRICE_LEVEL_EXPENSIVE:'€€€', PRICE_LEVEL_VERY_EXPENSIVE:'€€€€'};
@@ -3092,16 +3177,23 @@ function ratingBadge(c){
 const OVMIRRORS = ['https://overpass.kumi.systems/api/interpreter',
   'https://overpass.private.coffee/api/interpreter',
   'https://overpass-api.de/api/interpreter'];
-async function overpass(q){
-  for (const url of OVMIRRORS){
-    try {
-      const r = await fetch(url, {method:'POST', body:q});
-      if (!r.ok) continue;
+/* Oglinzile Overpass cad des și una singură poate atârna minute întregi.
+   Le interogăm pe toate deodată și o luăm pe prima care răspunde. */
+function fetchT(url, opts, ms){
+  const ac = new AbortController();
+  const t = setTimeout(() => ac.abort(), ms);
+  return fetch(url, Object.assign({}, opts, {signal: ac.signal}))
+    .finally(() => clearTimeout(t));
+}
+async function overpass(q, ms){
+  const tries = OVMIRRORS.map(url =>
+    fetchT(url, {method:'POST', body:q}, ms || 14000).then(async r => {
+      if (!r.ok) throw new Error('http ' + r.status);
       const d = await r.json();
-      if (d && d.elements) return d.elements;
-    } catch(e){}
-  }
-  return null;
+      if (!d || !d.elements) throw new Error('gol');
+      return d.elements;
+    }));
+  try { return await Promise.any(tries); } catch(e){ return null; }
 }
 const PARK_CAT = 11;
 function walkMin(m){ return Math.max(1, Math.round(m/80)); }
@@ -3392,6 +3484,51 @@ async function buildPack(withImages){
   packing = false;
 }
 
+/* ══════════ plan comun între telefoane ══════════ */
+/* Nu există server: cel care planifică publică un fișier plan.json lângă aplicație,
+   ceilalți îl aduc de acolo. Sincronizare într-un singur sens, dar fără cont și fără cost. */
+const SYNC_KEYS = ['day','nDays','startDate','tier','custom','edits','deleted','layers',
+  'cost','persons','fuelPrice','fuelUse','mealCost','fav','maxStops','useC','off','open'];
+function publishPlan(){
+  const out = { _plan: 1, publicat: new Date().toISOString(),
+    de: (S.custom.length || Object.keys(S.day).length) ? 'plan de călătorie' : 'plan gol' };
+  SYNC_KEYS.forEach(k => out[k] = S[k]);
+  dl('plan.json', JSON.stringify(out, null, 1), 'application/json');
+  document.getElementById('syncMsg').innerHTML =
+    'Fișierul <b>plan.json</b> e descărcat. Urcă-l pe GitHub lângă <b>index.html</b>, '
+    + 'apoi ceilalți apasă <b>Adu planul publicat</b>.';
+}
+async function pullPlan(){
+  const msg = document.getElementById('syncMsg');
+  msg.textContent = 'Caut planul publicat…';
+  let d = null;
+  try {
+    const r = await fetch('./plan.json?t=' + Date.now(), {cache:'no-store'});
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    d = await r.json();
+  } catch(e){
+    msg.innerHTML = 'N-am găsit niciun <b>plan.json</b> lângă aplicație. '
+      + 'Cineva trebuie întâi să-l publice și să-l urce pe GitHub. '
+      + '<i>(Nu merge nici dacă deschizi aplicația dintr-un fișier local.)</i>';
+    return;
+  }
+  if (!d || !d._plan){ msg.textContent = 'Fișierul găsit nu e un plan valid.'; return; }
+  const când = d.publicat ? new Date(d.publicat).toLocaleString('ro-RO',
+    {day:'numeric', month:'short', hour:'2-digit', minute:'2-digit'}) : 'necunoscut';
+  const nZile = Object.keys(d.day||{}).length, nLoc = (d.custom||[]).length;
+  if (!confirm(`Planul publicat pe ${când}:\n· ${nZile} opriri planificate\n· ${nLoc} locuri adăugate\n\n`
+    + 'Se înlocuiesc zilele, nivelurile și locurile adăugate.\n'
+    + 'Bifele tale de vizitat și cheile rămân neatinse.\n\nContinui?')) {
+    msg.textContent = 'Anulat, n-am schimbat nimic.'; return; }
+  const backup = JSON.parse(JSON.stringify(S));
+  SYNC_KEYS.forEach(k => { if (d[k] !== undefined) S[k] = d[k]; });
+  buildMarkers(); renderAll(); loadWeather(); loadRoutes();
+  msg.innerHTML = `Plan adus (publicat ${esc(când)}). Bifele tale de vizitat au rămas.`;
+  toast('Planul publicat a fost aplicat.', 'Anulează', () => {
+    S = backup; buildMarkers(); renderAll(); msg.textContent = 'Am revenit la planul tău.';
+  });
+}
+
 /* ══════════ ajutor ══════════ */
 const HELP = [
   ['🔎','Bara de căutare de sus',
@@ -3416,11 +3553,14 @@ const HELP = [
     'Imaginile sunt <b>fotografii reale</b> din Wikipedia și Wikimedia Commons, cu credit și link.',
     'Poți pune un link propriu sau încărca o poză de-a ta.',
     '<b>Caută imagini pentru toate locurile</b>, în Export, le completează în bloc.']],
-  ['🏆','Topul din zonă, după notele Google',
-   'În modurile Mâncare și Magazine ai butonul <b>★ Adu notele de pe Google</b>. Aduce nota, numărul de recenzii și nivelul de preț, apoi poți ordona lista <b>după notă</b> în loc de distanță.',
-   ['Sus apare <b>🏆 Top după notă</b> — primele 10, dar numai cele cu minimum 25 de recenzii, ca să nu urce un local cu o singură notă de 5.',
-    'Locurile pe care Google le are și OpenStreetMap nu, se adaugă automat în listă.',
-    'Cere o <b>cheie Google Places</b> proprie, pusă în tabul Export. Nu există sursă gratuită fără cheie; fără ea, ai în continuare butonul ★ care deschide locul în Google Maps.']],
+  ['🏆','Sursa datelor și topul după notă',
+   'Dacă ai pus o <b>cheie Google Places</b> în tabul Export, explorarea zonei folosește <b>Google</b> ca sursă principală: rezultate în sub o secundă, cu note, număr de recenzii, nivel de preț și program. Panoul îți arată de unde vin datele.',
+   ['Fără cheie, se folosesc <b>Overpass</b> și <b>Photon</b> — gratuite, dar comunitare: se mișcă încet și pică des. Aplicația le interoghează în paralel, cu termen de expirare, ca să nu te blocheze.',
+    'Dacă Google refuză cererea, se trece automat pe OpenStreetMap și îți spune de ce.',
+    'Sus apare <b>🏆 Top după notă</b> — primele 10, dar numai cele cu minimum 25 de recenzii, ca să nu urce un local cu o singură notă de 5.',
+    'Comutatorul <b>distanță / notă</b> schimbă ordinea listei.',
+    'Localurile închise definitiv sunt eliminate automat.',
+    'Fundalul hărții rămâne OpenStreetMap — acolo n-a fost niciodată o problemă.']],
   ['🛒','Magazine și mâncare',
    'Unealta de zonă are trei moduri: <b>Atracții</b>, <b>Mâncare</b> și <b>Magazine</b>. Ultimul găsește supermarketuri, alimentari, piețe, măcelării, brutării și enoteci.',
    ['Vin cu <b>programul afișat</b> acolo unde OpenStreetMap îl are — contează, fiindcă magazinele mici din Italia închid la prânz și duminica.',
@@ -3463,6 +3603,13 @@ const HELP = [
   ['🧭','Navigație',
    'În popup ai <b>Google Maps</b> și <b>Waze</b>. Ambele pornesc navigația spre coordonatele exacte, nu spre o căutare după nume — deci nu te trimit la alt „Duomo” din Italia.',
    []],
+  ['👥','Doi oameni, același plan',
+   'Fiecare telefon își ține planul separat — nu se sincronizează singure, iar unul nu poate strica planul celuilalt.',
+   ['Cel care planifică apasă <b>📤 Publică planul</b>, primește un fișier <b>plan.json</b> și îl urcă pe GitHub lângă index.html.',
+    'Ceilalți apasă <b>📥 Adu planul publicat</b> și îl preiau. Se înlocuiesc zilele, nivelurile și locurile adăugate.',
+    '<b>Bifele de vizitat rămân ale fiecăruia</b>, ca să vă vedeți progresul separat. La fel și cheile API.',
+    'Ai <b>Anulează</b> în notificare dacă te-ai răzgândit.',
+    'Pentru un schimb rapid, fără GitHub, merge și <b>Salvează planul (.json)</b> trimis pe WhatsApp și încărcat cu <b>Încarcă un plan salvat</b>.']],
   ['💾','Salvare, offline și partajare',
    'Planul se salvează automat în browser, dar numai pe fișierul pe care îl deschizi tu.',
    ['<b>Salvează harta ca fișier nou</b> îți dă un HTML complet, cu planul și pozele înăuntru. Îl trimiți cuiva sau îl deschizi pe telefon și merge <b>fără internet</b>, mai puțin fundalul hărții.',
